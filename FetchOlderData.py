@@ -10,7 +10,7 @@ import time
 
 # Base URL and the range of IDs to scrape
 BASE_URL = "http://www.puneapmc.org/history.aspx?id=Rates"
-START_ID = 4385
+START_ID = 4386
 END_ID = 4335  # Inclusive
 
 # Output file configuration

@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer, util
 import torch
 import requests
 
-import config
+import config, mapping
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -32,13 +32,7 @@ except Exception as e:
 
 CITY = ["Pune,IN","Solapur,IN","Nagpur,IN","Mumbai,IN","Nashik,IN"]
 DATA_DIR = "priceData"  # Directory containing your Excel files
-ITEM_MAPPING_CONFIG = {
-    "kanda": "कांदा", "onion": "कांदा", "batata": "बटाटा", "potato": "बटाटा",
-    "bhindi": "भेंडी", "ladyfinger": "भेंडी", "ghevda": "घेवडा", "beans": "घेवडा",
-    "gajar": "गाजर", "carrot": "गाजर", "vangi": "वांगी", "brinjal": "वांगी",
-    "lasun": "लसूण", "garlic": "लसूण", "aale": "आले", "ginger": "आले",
-    "tamatar": "टोमॅटो", "tomato": "टोमॅटो",
-}
+ITEM_MAPPING_CONFIG = mapping.ITEM_MAPPING_CONFIG
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -63,11 +57,11 @@ class AgriBot:
 
         for filename in os.listdir(self.data_dir): # Read from the specified data_dir
             # Check if the file starts with the expected prefix and is an Excel file
-            if filename.startswith("Pune_market_rates_") and filename.endswith(".xlsx"):
+            if filename.startswith("Pune_Market_Rates_") and filename.endswith(".xlsx"):
                 filepath = os.path.join(self.data_dir, filename)
                 try:
                     df = pd.read_excel(filepath)
-                    required_columns = {"Date", "Market", "शेतिमाल", "किमान", "कमाल"}
+                    required_columns = {"Date", "Market", "शेतिमाल", "किमान", "कमाल","परिमाण"}
                     if not required_columns.issubset(df.columns):
                         logger.warning(f"Skipping {filepath}: Incomplete data format. Missing columns: {required_columns - set(df.columns)}")
                         continue
@@ -87,7 +81,8 @@ class AgriBot:
                                 "date": data_date,
                                 "min_rate": row["किमान"],
                                 "max_rate": row["कमाल"],
-                                "market": row["Market"]
+                                "market": row["Market"],
+                                "quantity": row["परिमाण"]
                             })
                         else:
                             logger.warning(f"Skipping row in {filepath}: Empty item name.")
@@ -120,17 +115,20 @@ class AgriBot:
                 header = f"{'Date 📅':<10} | {'Min 📉':<8} | {'Max 📈':<8}"
                 response_parts.append(header)
                 response_parts.append("-" * (len(header) + 2)) # Separator line
-
+                quantity=""
                 for entry in entries:
                     date_str = entry['date'].strftime('%d %b')
                     # Ensure rates are strings for consistent formatting
                     min_rate_str = str(entry['min_rate'])
                     max_rate_str = str(entry['max_rate'])
+                    quantity = str(entry['quantity'])
                     row_str = f"{date_str:<10} | {min_rate_str:<8} | {max_rate_str:<8}"
                     response_parts.append(row_str)
-
                 response_parts.append("-" * (len(header) + 2))
-                response_parts.append("❗️Rates of 100 Kg❗")
+                if quantity == "शेकडा":
+                    response_parts.append("❗️Rates of 100 Piece❗")
+                else:
+                    response_parts.append(f"️❗️Rates of 100 Kg❗")
                 response_parts.append("\n🌾Anything else I can assist with?🌾\n💬")
                 return "\n".join(response_parts)
             else:
