@@ -1,3 +1,4 @@
+import asyncio
 import pandas as pd
 import os
 import re
@@ -6,7 +7,16 @@ from telegram import Update # Changed from telegram.ext import Updater
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 # import asyncio # Can be removed if not used for other async tasks
 import logging
+from collections import defaultdict, deque
+from sentence_transformers import SentenceTransformer, util
+import torch
+import requests
 
+import config
+
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+user_History = defaultdict(lambda: deque(maxlen=5))
 # --- Configuration ---
 try:
     from config import TELEGRAM_BOT_TOKEN
@@ -20,6 +30,7 @@ except Exception as e:
     logging.critical(f"Error importing token from config.py: {e}")
     TELEGRAM_BOT_TOKEN = None
 
+CITY = ["Pune,IN","Solapur,IN","Nagpur,IN","Mumbai,IN","Nashik,IN"]
 DATA_DIR = "priceData"  # Directory containing your Excel files
 ITEM_MAPPING_CONFIG = {
     "kanda": "कांदा", "onion": "कांदा", "batata": "बटाटा", "potato": "बटाटा",
@@ -35,7 +46,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
 
 class AgriBot:
     def __init__(self, data_dir=DATA_DIR, item_mapping=ITEM_MAPPING_CONFIG):
@@ -120,6 +130,7 @@ class AgriBot:
                     response_parts.append(row_str)
 
                 response_parts.append("-" * (len(header) + 2))
+                response_parts.append("❗️Rates of 100 Kg❗")
                 response_parts.append("\n🌾Anything else I can assist with?🌾\n💬")
                 return "\n".join(response_parts)
             else:
@@ -127,14 +138,48 @@ class AgriBot:
         else:
             return f"Could not find any rate information for {item_marathi}. Are you sure it's a common crop? What else can I look up?"
 
+    def get_weather(self):
+        result = ""
+        for ct in CITY:
+            URL = f"https://api.openweathermap.org/data/2.5/weather?q={ct}&appid={config.OPENWTHR_API_KEY}&units=metric"
+            response = requests.get(URL)
+            data = response.json()
+            if response.status_code == 200:
+                weather = data['weather'][0]['main']  # e.g., Rain, Clear, Clouds
+                temp = data['main']['temp']  # current temp
+                feels_like = data['main']['feels_like']
+                humidity = data['main']['humidity']
+                # Simplified interpretation
+                status = {
+                    "Rain": "🌧Rain expected⛈",
+                    "Clear": "☀️Sunny☀️",
+                    "Clouds": "⛅️Cloudy🌤"
+                }.get(weather, weather)
+                result = result + f"☀️Weather in {ct}📍:\nTemperature: {temp}°C🌡 (Feels like {feels_like}°C🌡)\nWeather: {status} \tHumidity: {humidity}%\n\n"
+            else:
+                print("Could not fetch weather info.")
+        return result
+
     def respond_to_query(self, query: str) -> str:
         """Analyzes the user's query and calls the appropriate function."""
         query_lower = str(query).lower()
-        item_match = re.search(r"(?:rate|price)\s+(?:of)?\s*(.+)", query_lower)
-        if item_match:
-            item = item_match.group(1).strip()
-            item = re.sub(r'\s+(on|for)\s+date.*$', '', item, flags=re.IGNORECASE).strip()
+        #item_match = re.search(r"(?:rate|price)\s+(?:of)?\s*(.+)", query_lower)
+        # Match: "rate of xyz", "price xyz", "xyz rate", or just "xyz"
+        item_match = re.search(r"(?:rate|price)\s+(?:of\s+)?(.+)|(.+)\s*(?:rate|price)?$",query_lower)
+        if "weather" in query_lower:
+            return self.get_weather()
+            #return ("I currently don't support weather 🌤 but I can help with crop🌾 rates.")
+        elif "news" in query_lower:
+            return ("News feature coming 🔜 !")
+        elif item_match:
+            item = item_match.group(1) if item_match.group(1) else item_match.group(2)
+            # Clean up date/time text like "on date", "for date", "today", etc.
+            item = re.sub(r'\s+(on|for)\s+(date\s*)?.*$', '', item, flags=re.IGNORECASE).strip()
             item = re.sub(r'\s+today$', '', item, flags=re.IGNORECASE).strip()
+        # if item_match:
+        #     item = item_match.group(1).strip()
+        #     item = re.sub(r'\s+(on|for)\s+date.*$', '', item, flags=re.IGNORECASE).strip()
+        #     item = re.sub(r'\s+today$', '', item, flags=re.IGNORECASE).strip()
             if not item:
                  return ("It seems you asked for a rate, but I couldn't identify the item. "
                         "Could you please specify it? For example: 'Rate of Kanda'")
@@ -145,6 +190,8 @@ class AgriBot:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE): # Changed type hint to Update
     user_message = update.message.text
+    user_id = update.effective_user.id
+    user_History[user_id].append(user_message)
     bot_instance = context.bot_data.get('agri_bot')
     if not bot_instance:
         logger.error("AgriBot instance not found in bot_data.")
@@ -156,7 +203,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE): # 
         response = bot_instance.respond_to_query(user_message)
         # For pre-formatted text, usually no specific parse_mode is needed,
         # but if you use Markdown characters, you'd set parse_mode=ParseMode.MARKDOWN_V2
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+        await asyncio.sleep(1.5)
         await update.message.reply_text(response)
+
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
         await update.message.reply_text("Oops! Something went wrong on my end. Please try again.")
