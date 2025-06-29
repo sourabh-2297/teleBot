@@ -2,7 +2,7 @@ import asyncio
 import pandas as pd
 import os
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from telegram import Update # Changed from telegram.ext import Updater
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 # import asyncio # Can be removed if not used for other async tasks
@@ -11,12 +11,26 @@ from collections import defaultdict, deque
 from sentence_transformers import SentenceTransformer, util
 import torch
 import requests
+from bs4 import BeautifulSoup
 
 import config, mapping
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 user_History = defaultdict(lambda: deque(maxlen=5))
+
+# --- Cache Configuration ---
+# This dictionary will hold the scraped news and the time of the scrape.
+NEWS_CACHE = {
+    "data": None,
+    "timestamp": None
+}
+# We'll refresh the news if the cached data is older than 1 hour.
+CACHE_DURATION = timedelta(hours=1)
+
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # --- Configuration ---
 try:
     from config import TELEGRAM_BOT_TOKEN
@@ -98,6 +112,90 @@ class AgriBot:
         else:
             logger.info(f"Loaded data for {len(self.data)} items.")
 
+    def _scrape_news_from_source(self,url: str, category: str) -> list[str]:
+        """
+        Scrapes the top 5 headlines from a single Agrowon category page.
+        This is a private helper function.
+        """
+        logging.info(f"Scraping '{category}' from {url}")
+        headlines = []
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            # The class name 'headline-m_headline__...' is dynamic.
+            # We use a "contains" selector `[class*='...']` to make it more stable.
+            headline_tags = soup.select("h6[class*='headline-m_headline__']")
+
+            if not headline_tags:
+                logging.warning(f"No headline tags found for '{category}'. The website selector might be outdated.")
+                return []
+
+            for h6 in headline_tags[:5]:  # Limit to the top 5 headlines
+                # The link is in the parent 'a' tag of the 'h6'
+                link_tag = h6.find_parent('a')
+                if link_tag and link_tag.get('href'):
+                    title = h6.get_text(strip=True)
+                    link = link_tag['href']
+
+                    # Links on the site are relative (e.g., /weather-news/...). We must make them absolute.
+                    if not link.startswith('http'):
+                        base_url = "https://agrowon.esakal.com"
+                        link = f"{base_url}{link}"
+
+                    # Format for Telegram HTML links
+                    headlines.append(f'• <a href="{link}">{title}</a>')
+
+            return headlines
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to fetch URL {url}: {e}")
+            return []  # Return an empty list on network error
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while scraping {url}: {e}", exc_info=True)
+            return []
+
+    def get_latest_agrowon_news(self):
+        """
+        Fetches the latest news from Agrowon, using a 1-hour cache.
+        This is the main function your bot should call.
+        """
+        # 1. Check if we have valid, non-expired data in the cache
+        if NEWS_CACHE["data"] and NEWS_CACHE["timestamp"]:
+            if datetime.now() - NEWS_CACHE["timestamp"] < CACHE_DURATION:
+                logging.info("Returning fresh news from cache.")
+                return NEWS_CACHE["data"]
+
+        # 2. If cache is empty or expired, perform a fresh scrape
+        logging.info("Cache is stale or empty. Performing a fresh scrape.")
+
+        all_news_parts = ["📰 **Latest Agricultural News**\n"]
+        has_news = False
+
+        for category, url in mapping.NEWS_SOURCES.items():
+            scraped_headlines = self._scrape_news_from_source(url, category)
+            if scraped_headlines:
+                has_news = True
+                # Add a bold category header
+                all_news_parts.append(f"\n<b>{category}</b>")
+                all_news_parts.extend(scraped_headlines)
+
+        if not has_news:
+            return "Sorry, I couldn't retrieve any news at the moment. Please try again later."
+
+        final_response = "\n".join(all_news_parts)
+
+        # 3. Update the cache with the newly scraped data and the current time
+        NEWS_CACHE["data"] = final_response
+        NEWS_CACHE["timestamp"] = datetime.now()
+
+        return "📰\n"+final_response+"\n📰"
+
     def get_rate(self, item):
         """Retrieves rates for an item, returning the last 5 entries."""
         standardized_item = item.lower()
@@ -168,7 +266,12 @@ class AgriBot:
             return self.get_weather()
             #return ("I currently don't support weather 🌤 but I can help with crop🌾 rates.")
         elif "news" in query_lower:
-            return ("News feature coming 🔜 !")
+            news_html = self.get_latest_agrowon_news()
+            # This part simulates how the bot would see the text, without the HTML tags
+            if '<a href=' in news_html:
+                return (BeautifulSoup(news_html, "html.parser").get_text())
+            else:
+                return (news_html)
         elif item_match:
             item = item_match.group(1) if item_match.group(1) else item_match.group(2)
             # Clean up date/time text like "on date", "for date", "today", etc.
